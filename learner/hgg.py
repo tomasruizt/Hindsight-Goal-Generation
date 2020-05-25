@@ -1,9 +1,13 @@
 import copy
+from typing import NamedTuple, Union
+
 import numpy as np
 from envs import make_env
 from envs.utils import goal_distance
 from algorithm.replay_buffer import Trajectory, goal_concat
-from utils.gcc_utils import gcc_load_lib, c_double, c_int
+from utils.gcc_utils import gcc_load_lib, c_double
+from utils.os_utils import Logger
+
 
 class TrajectoryPool:
 	def __init__(self, args, pool_length):
@@ -32,6 +36,7 @@ class TrajectoryPool:
 			pool += copy.deepcopy(self.pool)
 			pool_init_state += copy.deepcopy(self.pool_init_state)
 		return copy.deepcopy(pool[:self.length]), copy.deepcopy(pool_init_state[:self.length])
+
 
 class MatchSampler:
 	def __init__(self, args, achieved_trajectory_pool):
@@ -133,23 +138,31 @@ class MatchSampler:
 		assert len(explore_goals)==self.length
 		self.pool = np.array(explore_goals)
 
+
+class HGGLearnerInput(NamedTuple):
+	env: str
+	logger: Logger
+	goal: str = "interval"
+	episodes: int = 50
+	hgg_pool_size = 1000
+	timesteps = 50 # TODO: dynamic wrt env
+	warmup = 10000
+	train_batches = 20
+
+
 class HGGLearner:
-	def __init__(self, args):
-		self.args = args
+	def __init__(self, args: HGGLearnerInput):
+		self._args = args
 		self.env = make_env(args)
-		self.env_test = make_env(args)
 
-		self.env_List = []
-		for i in range(args.episodes):
-			self.env_List.append(make_env(args))
-
+		self.env_List = [make_env(args) for _ in range(args.episodes)]
 		self.achieved_trajectory_pool = TrajectoryPool(args, args.hgg_pool_size)
 		self.sampler = MatchSampler(args, self.achieved_trajectory_pool)
 
 	def learn(self, args, env, env_test, agent, buffer):
 		initial_goals = []
 		desired_goals = []
-		for i in range(args.episodes):
+		for i in range(self._args.episodes):
 			obs = self.env_List[i].reset()
 			goal_a = obs['achieved_goal'].copy()
 			goal_d = obs['desired_goal'].copy()
@@ -160,7 +173,7 @@ class HGGLearner:
 
 		achieved_trajectories = []
 		achieved_init_states = []
-		for i in range(args.episodes):
+		for i in range(self._args.episodes):
 			obs = self.env_List[i].get_obs()
 			init_state = obs['observation'].copy()
 			explore_goal = self.sampler.sample(i)
@@ -168,11 +181,11 @@ class HGGLearner:
 			obs = self.env_List[i].get_obs()
 			current = Trajectory(obs)
 			trajectory = [obs['achieved_goal'].copy()]
-			for timestep in range(args.timesteps):
+			for timestep in range(self._args.timesteps):
 				action = agent.step(obs, explore=True)
 				obs, reward, done, info = self.env_List[i].step(action)
 				trajectory.append(obs['achieved_goal'].copy())
-				if timestep==args.timesteps-1: done = True
+				if timestep==self._args.timesteps-1: done = True
 				current.store_step(action, obs, reward, done)
 				if done: break
 			achieved_trajectories.append(np.array(trajectory))
@@ -180,14 +193,14 @@ class HGGLearner:
 			buffer.store_trajectory(current)
 			agent.normalizer_update(buffer.sample_batch())
 
-			if buffer.steps_counter>=args.warmup:
-				for _ in range(args.train_batches):
+			if buffer.steps_counter >= self._args.warmup:
+				for _ in range(self._args.train_batches):
 					info = agent.train(buffer.sample_batch())
-					args.logger.add_dict(info)
+					self._args.logger.add_dict(info)
 				agent.target_update()
 
 		selection_trajectory_idx = {}
-		for i in range(self.args.episodes):
+		for i in range(self._args.episodes):
 			if goal_distance(achieved_trajectories[i][0], achieved_trajectories[i][-1])>0.01:
 				selection_trajectory_idx[i] = True
 		for idx in selection_trajectory_idx.keys():
