@@ -160,15 +160,8 @@ class HGGLearner:
 		self.sampler = MatchSampler(args, self.achieved_trajectory_pool)
 
 	def learn(self, args, env, env_test, agent, buffer):
-		initial_goals = []
-		desired_goals = []
-		for i in range(self._args.episodes):
-			obs = self.env_List[i].reset()
-			goal_a = obs['achieved_goal'].copy()
-			goal_d = obs['desired_goal'].copy()
-			initial_goals.append(goal_a.copy())
-			desired_goals.append(goal_d.copy())
-
+		many_obs = [o.reset() for o in self.env_List]
+		initial_goals, desired_goals = zip(*[(o['achieved_goal'], o['desired_goal']) for o in many_obs])
 		self.sampler.update(initial_goals, desired_goals)
 
 		achieved_trajectories = []
